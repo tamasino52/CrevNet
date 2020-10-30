@@ -153,7 +153,7 @@ def plot(x, epoch,p = False):
     mse = 0
     for s in range(nsample):
         frame_predictor.hidden = frame_predictor.init_hidden()
-        memo = Variable(torch.zeros(opt.batch_size, opt.rnn_size ,3, int(opt.image_width/8), int(opt.image_width/8)).cuda())
+        memo = Variable(torch.zeros(opt.batch_size, opt.rnn_size, 3, int(opt.image_width/8), int(opt.image_width/8)).cuda())
         gen_seq[s].append(x[0])
         x_in = x[0]
         for i in range(1, opt.n_eval):

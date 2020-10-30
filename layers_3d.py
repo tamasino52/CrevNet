@@ -12,8 +12,7 @@ from itertools import accumulate
 
 
 class irevnet_block(nn.Module):
-    def __init__(self, in_ch, out_ch, stride=1, first=False, dropout_rate=0.,
-                 affineBN=True, mult=2):
+    def __init__(self, in_ch, out_ch, stride=1, first=False, dropout_rate=0., affineBN=True, mult=2):
         """
         in_ch = 4
         out_ch = [1, 1, 1, 1, 2, 1, 1, 1, 1, 2, 1, 1] -> 12       out_ch, stride는 왼쪽에 있는 순서대로 가변적임
