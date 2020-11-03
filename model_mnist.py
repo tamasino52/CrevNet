@@ -1,3 +1,4 @@
+# Library import
 import torch
 import torch.optim as optim
 import torch.nn as nn
@@ -6,46 +7,53 @@ import os
 import random
 from torch.autograd import Variable
 from torch.utils.data import DataLoader
-import data_utils
 import numpy as np
 import time
-import pssim.pytorch_ssim as pytorch_ssim
 from skimage.measure import compare_ssim
 from tqdm import trange
+import easydict
 
+# Local Module
+import pssim.pytorch_ssim as pytorch_ssim
+import utils.data_utils as data_utils
+import utils.utils as utils
+import utils.utils_3d as utils_3d
 
-parser = argparse.ArgumentParser()
-parser.add_argument('--lr', default=0.0005, type=float, help='learning rate')
-parser.add_argument('--beta1', default=0.9, type=float, help='momentum term for adam')
-parser.add_argument('--batch_size', default=16, type=int, help='batch size')
-parser.add_argument('--log_dir', default='logs', help='base directory to save logs')
-parser.add_argument('--model_dir', default='', help='base directory to save logs')
-parser.add_argument('--name', default='', help='identifier for directory')
-parser.add_argument('--data_root', default='data', help='root directory for data')
-parser.add_argument('--optimizer', default='adam', help='optimizer to train with')
-parser.add_argument('--niter', type=int, default=60, help='number of epochs to train for')
-parser.add_argument('--seed', default=1, type=int, help='manual seed')
-parser.add_argument('--epoch_size', type=int, default=5000, help='epoch size')
-parser.add_argument('--image_width', type=int, default=64, help='the height / width of the input image to network')
-parser.add_argument('--channels', default=1, type=int)
-parser.add_argument('--dataset', default='smmnist', help='dataset to train with')
-parser.add_argument('--n_past', type=int, default=8, help='number of frames to condition on')
-parser.add_argument('--n_future', type=int, default=10, help='number of frames to predict')
-parser.add_argument('--n_eval', type=int, default=18, help='number of frames to predict at eval time')
-parser.add_argument('--rnn_size', type=int, default=32, help='dimensionality of hidden layer')
-parser.add_argument('--predictor_rnn_layers', type=int, default=8, help='number of layers')
-parser.add_argument('--beta', type=float, default=0.0001, help='weighting on KL to prior')
-parser.add_argument('--model', default='crevnet', help='model type (dcgan | vgg)')
-parser.add_argument('--data_threads', type=int, default=0, help='number of data loading threads')
-parser.add_argument('--num_digits', type=int, default=2, help='number of digits for moving mnist')
+# Option parameter
+opt = easydict.EasyDict({})
+opt.lr = 0.0005
+opt.beta1 = 0.9
+opt.batch_size = 7
+opt.log_dir = 'logs'
+opt.model_dir = ''
+opt.name = ''
+opt.data_root = 'data'
+opt.optimizer = optim.Adam
+opt.data_type = 'sequence'
+opt.niter = 60
+opt.epoch_size =5000
+opt.image_width = 64
+opt.channels = 1
+opt.dataset = 'smmnist'
+opt.n_past = 8
+opt.n_future = 10
+opt.n_eval = 18
+opt.rnn_size = 32
+opt.predictor_rnn_layers = 8
+opt.beta = 0.0001
+opt.model = 'crevnet'
+opt.data_threads = 0
+opt.num_digits = 2
+opt.max_step = opt.n_past + opt.n_future + 2
 
+# Random seed setting
+opt.seed = 1
+random.seed(opt.seed)
+torch.manual_seed(opt.seed)
+torch.cuda.manual_seed_all(opt.seed)
+dtype = torch.cuda.FloatTensor
 
-
-opt = parser.parse_args()
-
-
-
-
+# Folder naming
 if opt.model_dir != '':
     saved_model = torch.load('%s/model.pth' % opt.model_dir)
     optimizer = opt.optimizer
@@ -64,53 +72,39 @@ else:
 os.makedirs('%s/gen/' % opt.log_dir, exist_ok=True)
 os.makedirs('%s/plots/' % opt.log_dir, exist_ok=True)
 
+# Model setting
+from AutoEncoder.AutoEncoder import AutoEncoder
+from RPM.ReversiblePredictor import ReversiblePredictor
 
+frame_predictor = ReversiblePredictor(input_size=opt.rnn_size,
+                                      hidden_size=opt.rnn_size,
+                                      output_size=opt.rnn_size,
+                                      n_layers=opt.predictor_rnn_layers,
+                                      batch_size=opt.batch_size)
 
-
-
-opt.max_step = opt.n_past + opt.n_future + 2
-print("Random Seed: ", opt.seed)
-random.seed(opt.seed)
-torch.manual_seed(opt.seed)
-torch.cuda.manual_seed_all(opt.seed)
-dtype = torch.cuda.FloatTensor
-opt.data_type = 'sequence'
-# ---------------- load the models  ----------------
-
-print(opt)
-
-# ---------------- optimizers ----------------
-opt.optimizer = optim.Adam
-
-
-import layers_3d as model
-
-
-frame_predictor = model.zig_rev_predictor(opt.rnn_size,  opt.rnn_size, opt.rnn_size, opt.predictor_rnn_layers,opt.batch_size)
-encoder = model.autoencoder(nBlocks=[4,5,3], nStrides=[1, 2, 2],
-                    nChannels=None, init_ds=2,
-                    dropout_rate=0., affineBN=True, in_shape=[opt.channels, opt.image_width, opt.image_width],
-                    mult=2)
+encoder = AutoEncoder(nBlocks=[4,5,3],
+                      nStrides=[1, 2, 2],
+                      nChannels=None,
+                      init_ds=2,
+                      dropout_rate=0.,
+                      affineBN=True,
+                      in_shape=[opt.channels, opt.image_width, opt.image_width],
+                      mult=2)
 
 frame_predictor_optimizer = opt.optimizer(frame_predictor.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
 encoder_optimizer = opt.optimizer(encoder.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
 
-
 scheduler1 = torch.optim.lr_scheduler.StepLR(frame_predictor_optimizer, step_size=50, gamma=0.2)
 scheduler2 = torch.optim.lr_scheduler.StepLR(encoder_optimizer, step_size=50, gamma=0.2)
 
-
-# --------- loss functions ------------------------------------
 mse_criterion = nn.MSELoss()
 
-
-# --------- transfer to gpu ------------------------------------
+# Transfer to GPU
 frame_predictor.cuda()
 encoder.cuda()
 mse_criterion.cuda()
 
-
-# --------- load a dataset ------------------------------------
+# Dataset loading
 train_data, test_data = data_utils.load_dataset(opt)
 
 train_loader = DataLoader(train_data,
@@ -127,14 +121,12 @@ test_loader = DataLoader(test_data,
                          pin_memory=False)
 
 
+# Batch generating
 def get_training_batch():
     while True:
         for sequence in train_loader:
             batch = data_utils.normalize_data(opt, dtype, sequence)
             yield batch
-
-
-training_batch_generator = get_training_batch()
 
 
 def get_testing_batch():
@@ -144,9 +136,12 @@ def get_testing_batch():
             yield batch
 
 
+training_batch_generator = get_training_batch()
 testing_batch_generator = get_testing_batch()
 
-def plot(x, epoch,p = False):
+
+# Plot
+def plot(x, epoch, p=False):
     nsample = 1
     gen_seq = [[] for i in range(nsample)]
     gt_seq = [x[i] for i in range(len(x))]
@@ -215,8 +210,8 @@ def plot(x, epoch,p = False):
     return mse / 10.0
 
 
-# --------- training funtions ------------------------------------
-def train(x,e):
+# Train
+def train(x, e):
     frame_predictor.zero_grad()
     encoder.zero_grad()
 
@@ -224,13 +219,12 @@ def train(x,e):
     frame_predictor.hidden = frame_predictor.init_hidden()
     mse = 0
 
-    memo = Variable(torch.zeros(opt.batch_size, opt.rnn_size ,3, int(opt.image_width/8), int(opt.image_width/8)).cuda())
+    memo = Variable(torch.zeros(opt.batch_size, opt.rnn_size, 3, int(opt.image_width/8), int(opt.image_width/8)).cuda())
     for i in range(1, opt.n_past + opt.n_future):
         h = encoder(x[i - 1], True)
-        h_pred,memo = frame_predictor((h,memo))
+        h_pred, memo = frame_predictor((h, memo))
         x_pred = encoder(h_pred,False)
-        mse +=  (mse_criterion(x_pred, x[i]))
-
+        mse += (mse_criterion(x_pred, x[i]))
 
     loss = mse
     loss.backward()
@@ -241,8 +235,7 @@ def train(x,e):
     return mse.data.cpu().numpy() / (opt.n_past + opt.n_future)
 
 
-
-# --------- training loop ------------------------------------
+# Train loop
 for epoch in range(opt.niter):
     frame_predictor.train()
     encoder.train()
@@ -252,13 +245,13 @@ for epoch in range(opt.niter):
         x = next(training_batch_generator)
         input = []
         for j in range(opt.n_eval):
-            k1 = x[j][:, 0][:,None,None,:,:]
-            k2 = x[j + 1][:, 0][:,None,None,:,:]
-            k3 = x[j + 2][:, 0][:,None,None,:,:]
+            k1 = x[j][:, 0][:, None, None, :, :]
+            k2 = x[j + 1][:, 0][:, None, None, :, :]
+            k3 = x[j + 2][:, 0][:, None, None, :, :]
 
             input.append(torch.cat((k1,k2,k3),2))
         mse = 0
-        mse = train(input,epoch)
+        mse = train(input, epoch)
         epoch_mse += mse
 
     scheduler1.step()
@@ -288,23 +281,15 @@ for epoch in range(opt.niter):
             epoch, epoch_mse / opt.epoch_size,eval/ 100.0, epoch * opt.epoch_size * opt.batch_size))
 
     # save the model
-
-
-
     if epoch % 10 == 0:
         torch.save({
             'encoder': encoder,
             'frame_predictor': frame_predictor,
             'opt': opt},
-            '%s/model_%s.pth' % (opt.log_dir,epoch))
-
+            '%s/model_%s.pth' % (opt.log_dir, epoch))
 
     torch.save({
         'encoder': encoder,
         'frame_predictor': frame_predictor,
         'opt': opt},
         '%s/model.pth' % opt.log_dir)
-
-
-
-
