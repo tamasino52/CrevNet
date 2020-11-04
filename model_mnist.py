@@ -18,20 +18,21 @@ import pssim.pytorch_ssim as pytorch_ssim
 import utils.data_utils as data_utils
 import utils.utils as utils
 import utils.utils_3d as utils_3d
+from DOFLoss import DOFLoss
 
 # Option parameter
 opt = easydict.EasyDict({})
 opt.lr = 0.0005
 opt.beta1 = 0.9
-opt.batch_size = 7
+opt.batch_size = 1
 opt.log_dir = 'logs'
 opt.model_dir = ''
-opt.name = ''
+opt.name = 'mymodel'
 opt.data_root = 'data'
 opt.optimizer = optim.Adam
 opt.data_type = 'sequence'
 opt.niter = 60
-opt.epoch_size =5000
+opt.epoch_size = 5000
 opt.image_width = 64
 opt.channels = 1
 opt.dataset = 'smmnist'
@@ -63,7 +64,7 @@ if opt.model_dir != '':
     opt.model_dir = model_dir
     opt.log_dir = '%s/continued' % opt.log_dir
 else:
-    name = 'model_mnist=layers_%s=seq_len_%s=batch_size_%s' % (opt.predictor_rnn_layers,opt.n_eval,opt.batch_size)
+    name = 'model_custom=layers_%s=seq_len_%s=batch_size_%s' % (opt.predictor_rnn_layers,opt.n_eval,opt.batch_size)
     if opt.dataset == 'smmnist':
         opt.log_dir = '%s/%s-%d/%s' % (opt.log_dir, opt.dataset, opt.num_digits, name)
     else:
@@ -211,28 +212,34 @@ def plot(x, epoch, p=False):
 
 
 # Train
-def train(x, e):
+def train(x, e, DOF_Loss=None):
     frame_predictor.zero_grad()
     encoder.zero_grad()
 
     # initialize the hidden state.
     frame_predictor.hidden = frame_predictor.init_hidden()
-    mse = 0
-
+    MSE_Loss = 0
+    DOF_Loss = 0
     memo = Variable(torch.zeros(opt.batch_size, opt.rnn_size, 3, int(opt.image_width/8), int(opt.image_width/8)).cuda())
+
     for i in range(1, opt.n_past + opt.n_future):
         h = encoder(x[i - 1], True)
         h_pred, memo = frame_predictor((h, memo))
-        x_pred = encoder(h_pred,False)
-        mse += (mse_criterion(x_pred, x[i]))
+        x_pred = encoder(h_pred, False)
+        MSE_Loss += mse_criterion(x[i], x_pred)
+        gen_diff, gt_diff = DOFLoss.dense_optical_flow_loss(x_pred, x[i], opt.channels)
 
-    loss = mse
+        for i in range(len(gen_diff)):
+            DOF_Loss += DOFLoss.calc_optical_flow_loss(gen_diff[i], gt_diff[i], torch.device('cuda:0')) / 2
+
+    # 역전파 적용
+    loss = 0.8 * MSE_Loss + 0.2 * DOF_Loss
     loss.backward()
 
     frame_predictor_optimizer.step()
     encoder_optimizer.step()
 
-    return mse.data.cpu().numpy() / (opt.n_past + opt.n_future)
+    return MSE_Loss.data.cpu().numpy() / (opt.n_past + opt.n_future)
 
 
 # Train loop
